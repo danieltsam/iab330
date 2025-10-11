@@ -60,7 +60,7 @@ class GestureIOApp:
         self.stream_button = ttk.Button(frame, text="Start Stream", command=self.toggle_stream, state="disabled")
         self.stream_button.grid(row=1, column=0, columnspan=2, pady=5)
 
-        self.record_button = ttk.Button(frame, text="Save Recording", command=self.toggle_recording, state="disabled")
+        self.record_button = ttk.Button(frame, text="Start Recording", command=self.toggle_recording, state="disabled")
         self.record_button.grid(row=1, column=2, columnspan=2, pady=5)
 
         # Matplotlib plot
@@ -192,7 +192,7 @@ class GestureIOApp:
             self.csv_file.close()
             self.csv_writer = None
             self.csv_file = None
-            self.record_button.config(text="💾 Save Recording")
+            self.record_button.config(text="💾 Start Recording")
             print("🛑 Recording stopped.")
 
     # --------------------------
