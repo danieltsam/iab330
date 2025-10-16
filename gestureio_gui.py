@@ -10,8 +10,8 @@ from tkinter import ttk, messagebox
 from bleak import BleakClient, BleakScanner
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from live_inference import LiveCNNInference
 
-# === BLE UUIDs ===
 HAR_SERVICE_UUID = "12345678-1234-5678-1234-56789abcdef0"
 ACCEL_GYRO_CHAR_UUID = "12345678-1234-5678-1234-56789abcdef1"
 COMMAND_CHAR_UUID = "12345678-1234-5678-1234-56789abcdef2"
@@ -34,15 +34,13 @@ class GestureIOApp:
         self.data_buffer = [[], [], [], []]  # timestamp, ax, ay, az
         self.loop = asyncio.new_event_loop()
 
-        # Build UI
-        self._build_ui()
+        self.inference_active = False
+        self.infer = None  # type: LiveCNNInference | None
+        self.last_pred_text = tk.StringVar(value="—")
 
-        # Start asyncio loop in background
+        self._build_ui()
         threading.Thread(target=self._run_loop, daemon=True).start()
 
-    # --------------------------
-    # GUI SETUP
-    # --------------------------
     def _build_ui(self):
         frame = ttk.Frame(self.root, padding=10)
         frame.grid(row=0, column=0, sticky="nsew")
@@ -64,37 +62,45 @@ class GestureIOApp:
         self.stream_button.grid(row=1, column=0, columnspan=2, pady=5)
 
         self.record_button = ttk.Button(frame, text="Start Recording", command=self.toggle_recording, state="disabled")
-        self.record_button.grid(row=1, column=2, columnspan=2, pady=5)
+        self.record_button.grid(row=1, column=2, columnspan=1, pady=5)
 
-        ttk.Label(frame, text="File Name:").grid(row=2, column=0, sticky="w")
+        ttk.Label(frame, text="Model Export Dir:").grid(row=2, column=0, sticky="w")
+        self.export_dir_var = tk.StringVar(value="models/")
+        self.export_entry = ttk.Entry(frame, textvariable=self.export_dir_var, width=35)
+        self.export_entry.grid(row=2, column=1, columnspan=2, padx=5, sticky="ew")
+
+        self.infer_button = ttk.Button(frame, text="Start Inference", command=self.toggle_inference, state="disabled")
+        self.infer_button.grid(row=2, column=3, padx=5)
+
+        ttk.Label(frame, text="File Name:").grid(row=3, column=0, sticky="w")
         self.filename_var = tk.StringVar()
         self.filename_entry = ttk.Entry(frame, textvariable=self.filename_var, width=35)
-        self.filename_entry.grid(row=2, column=1, columnspan=3, padx=5, sticky="ew")
+        self.filename_entry.grid(row=3, column=1, columnspan=3, padx=5, sticky="ew")
         self.filename_var.set("gesture_recordings.csv")
 
-        # Matplotlib plot
+        ttk.Label(frame, text="Prediction:").grid(row=1, column=4, sticky="e")
+        self.pred_label = ttk.Label(frame, textvariable=self.last_pred_text, font=("Segoe UI", 12, "bold"))
+        self.pred_label.grid(row=1, column=5, sticky="w")
+
         fig, self.ax = plt.subplots(figsize=(7, 4))
         self.lines = [self.ax.plot([], [])[0] for _ in range(3)]
         self.ax.set_title("Realtime Accelerometer Data (ax, ay, az)")
         self.ax.set_xlabel("Samples")
         self.ax.set_ylabel("Value")
         self.canvas = FigureCanvasTkAgg(fig, master=self.root)
-        self.canvas.get_tk_widget().grid(row=2, column=0, columnspan=5, pady=10)
+        self.canvas.get_tk_widget().grid(row=4, column=0, columnspan=6, pady=10, sticky="nsew")
+
+        for c in range(6):
+            self.root.grid_columnconfigure(c, weight=1)
+        self.root.grid_rowconfigure(4, weight=1)
 
         self.root.after(200, self.update_plot)
 
-    # --------------------------
-    # ASYNC EVENT LOOP
-    # --------------------------
     def _run_loop(self):
         asyncio.set_event_loop(self.loop)
         self.loop.run_forever()
 
-    # --------------------------
-    # BLE SCANNING
-    # --------------------------
     def scan_devices(self):
-        """Disable input during scan and re-enable after."""
         self.device_box["state"] = "disabled"
         self.scan_button["state"] = "disabled"
         self.status_label.config(text="Scanning...", foreground="orange")
@@ -125,9 +131,6 @@ class GestureIOApp:
 
         asyncio.run_coroutine_threadsafe(async_scan(), self.loop)
 
-    # --------------------------
-    # BLE CONNECTION
-    # --------------------------
     def connect_device(self):
         selected = self.device_box.get()
         if not selected:
@@ -146,7 +149,8 @@ class GestureIOApp:
                     self.status_label.config(text="Connected", foreground="green")
                     self.stream_button["state"] = "normal"
                     self.record_button["state"] = "normal"
-                    print(f"✅ Connected to {address}")
+                    self.infer_button["state"] = "normal"
+                    print(f"Connected to {address}")
                 else:
                     raise Exception("Failed to connect.")
             except Exception as e:
@@ -155,15 +159,12 @@ class GestureIOApp:
 
         asyncio.run_coroutine_threadsafe(async_connect(), self.loop)
 
-    # --------------------------
-    # STREAM CONTROL
-    # --------------------------
     def toggle_stream(self):
         if not self.client or not self.client.is_connected:
             messagebox.showwarning("Not Connected", "Please connect to a device first.")
             return
         start = not self.streaming
-        self.stream_button.config(text="⏹ Stop Stream" if start else "▶ Start Stream")
+        self.stream_button.config(text="Stop Stream" if start else "Start Stream")
 
         async def async_toggle_stream():
             try:
@@ -172,13 +173,13 @@ class GestureIOApp:
                     await asyncio.sleep(0.3)
                     await self.client.write_gatt_char(COMMAND_CHAR_UUID, b"START")
                     self.streaming = True
-                    print("▶ Streaming started.")
+                    print("Streaming started.")
                 else:
                     await self.client.write_gatt_char(COMMAND_CHAR_UUID, b"STOP")
                     await asyncio.sleep(0.2)
                     await self.client.stop_notify(ACCEL_GYRO_CHAR_UUID)
                     self.streaming = False
-                    print("⏹ Streaming stopped.")
+                    print("Streaming stopped.")
             except Exception as e:
                 messagebox.showerror("Stream Error", str(e))
                 self.streaming = False
@@ -186,9 +187,35 @@ class GestureIOApp:
 
         asyncio.run_coroutine_threadsafe(async_toggle_stream(), self.loop)
 
-    # --------------------------
-    # RECORDING CONTROL
-    # --------------------------
+    def toggle_inference(self):
+        if not self.client or not self.client.is_connected:
+            messagebox.showwarning("Not Connected", "Please connect to a device first.")
+            return
+
+        if not self.inference_active:
+            export_dir = self.export_dir_var.get().strip()
+            if not export_dir:
+                messagebox.showwarning("Export Dir Required", "Enter the model export directory.")
+                return
+            try:
+                self.infer = LiveCNNInference(export_dir=export_dir)
+                self.infer.reset()
+                self.inference_active = True
+                self.infer_button.config(text="Stop Inference")
+                print(f"Inference started (cnn_1d) from {export_dir}")
+            except Exception as e:
+                messagebox.showerror("Inference Error", str(e))
+                self.inference_active = False
+                self.infer = None
+        else:
+            self.inference_active = False
+            if self.infer:
+                self.infer.reset()
+            self.infer = None
+            self.last_pred_text.set("—")
+            self.infer_button.config(text="Start Inference")
+            print("Inference stopped.")
+
     def toggle_recording(self):
         if not self.recording_active:
             filename = self.filename_var.get().strip()
@@ -202,14 +229,11 @@ class GestureIOApp:
             self.current_recording_label = datetime.now(AEST).strftime("Recording %Y-%m-%d %H:%M:%S")
             self.recording_data = []
             self.recording_active = True
-            self.record_button.config(text="🛑 Stop Recording")
-            print(f"💾 Recording started: {filename}")
+            self.record_button.config(text="Stop Recording")
+            print(f"Recording started: {filename}")
         else:
             self._finalize_recording()
 
-    # --------------------------
-    # HANDLE NOTIFICATION
-    # --------------------------
     def handle_notification(self, sender, data):
         imu = struct.unpack("<6h", data)
         ax, ay, az, gx, gy, gz = imu
@@ -219,23 +243,29 @@ class GestureIOApp:
         self.data_buffer[1].append(ax)
         self.data_buffer[2].append(ay)
         self.data_buffer[3].append(az)
-
         if len(self.data_buffer[0]) > 100:
             for buf in self.data_buffer:
                 buf.pop(0)
 
+        if self.inference_active and self.infer is not None:
+            try:
+                out = self.infer.update([ax, ay, az, gx, gy, gz])
+                if out is not None:
+                    label, probs = out
+                    conf = probs.get(label, 0.0)
+                    self.root.after(0, lambda: self.last_pred_text.set(f"{label}  ({conf:.2f})"))
+            except Exception as e:
+                self.root.after(0, lambda: messagebox.showerror("Inference Error", str(e)))
+                self.inference_active = False
+                self.infer = None
+                self.root.after(0, lambda: self.infer_button.config(text="Start Inference"))
+
         if self.recording_active:
-            self.recording_data.append(
-                f"{ts},{ax},{ay},{az},{gx},{gy},{gz}"
-            )
+            self.recording_data.append(f"{ts},{ax},{ay},{az},{gx},{gy},{gz}")
             if len(self.recording_data) >= 128:
-                # Stop capturing additional samples immediately and finalize on the GUI thread
                 self.recording_active = False
                 self.root.after(0, self._finalize_recording)
 
-    # --------------------------
-    # REALTIME PLOT UPDATE
-    # --------------------------
     def update_plot(self):
         for i, line in enumerate(self.lines):
             line.set_ydata(self.data_buffer[i + 1])
@@ -245,15 +275,12 @@ class GestureIOApp:
         self.canvas.draw()
         self.root.after(200, self.update_plot)
 
-    # --------------------------
-    # SAVE RECORDING TO FILE
-    # --------------------------
     def _save_recording(self):
         if not self.recording_filename:
             return
 
         if not self.recording_data:
-            print("⚠️ No data captured during recording; nothing to save.")
+            print("️ No data captured during recording; nothing to save.")
             return
 
         filename = self.recording_filename
@@ -300,15 +327,14 @@ class GestureIOApp:
             writer = csv.writer(output_file)
             writer.writerows(rows)
 
-        print(f"💾 Recording saved to {os.path.abspath(filename)} (column: {column_label})")
+        print(f"Recording saved to {os.path.abspath(filename)} (column: {column_label})")
 
     def _finalize_recording(self):
-        """Stop recording and persist collected samples."""
         self.recording_active = False
         sample_count = len(self.recording_data)
 
-        if self.record_button.cget("text") != "💾 Start Recording":
-            self.record_button.config(text="💾 Start Recording")
+        if self.record_button.cget("text") != "Start Recording":
+            self.record_button.config(text="Start Recording")
 
         try:
             self._save_recording()
@@ -319,11 +345,8 @@ class GestureIOApp:
             self.recording_filename = None
             self.current_recording_label = None
             if sample_count:
-                print(f"🛑 Recording stopped after capturing {sample_count} samples.")
+                print(f"Recording stopped after capturing {sample_count} samples.")
 
-# --------------------------
-# MAIN APP ENTRY
-# --------------------------
 if __name__ == "__main__":
     root = tk.Tk()
     app = GestureIOApp(root)
