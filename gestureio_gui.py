@@ -2,6 +2,7 @@ import asyncio
 import threading
 import struct
 import csv
+import os
 from datetime import datetime, timezone, timedelta
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -25,8 +26,10 @@ class GestureIOApp:
         self.client = None
         self.devices = []
         self.streaming = False
-        self.csv_writer = None
-        self.csv_file = None
+        self.recording_active = False
+        self.recording_data = []
+        self.recording_filename = None
+        self.current_recording_label = None
 
         self.data_buffer = [[], [], [], []]  # timestamp, ax, ay, az
         self.loop = asyncio.new_event_loop()
@@ -63,8 +66,14 @@ class GestureIOApp:
         self.record_button = ttk.Button(frame, text="Start Recording", command=self.toggle_recording, state="disabled")
         self.record_button.grid(row=1, column=2, columnspan=2, pady=5)
 
+        ttk.Label(frame, text="File Name:").grid(row=2, column=0, sticky="w")
+        self.filename_var = tk.StringVar()
+        self.filename_entry = ttk.Entry(frame, textvariable=self.filename_var, width=35)
+        self.filename_entry.grid(row=2, column=1, columnspan=3, padx=5, sticky="ew")
+        self.filename_var.set("gesture_recordings.csv")
+
         # Matplotlib plot
-        fig, self.ax = plt.subplots(figsize=(7, 3))
+        fig, self.ax = plt.subplots(figsize=(7, 4))
         self.lines = [self.ax.plot([], [])[0] for _ in range(3)]
         self.ax.set_title("Realtime Accelerometer Data (ax, ay, az)")
         self.ax.set_xlabel("Samples")
@@ -181,19 +190,22 @@ class GestureIOApp:
     # RECORDING CONTROL
     # --------------------------
     def toggle_recording(self):
-        if not self.csv_writer:
-            filename = f"gestureio_{datetime.now(AEST).strftime('%Y%m%d_%H%M%S')}.csv"
-            self.csv_file = open(filename, "w", newline="")
-            self.csv_writer = csv.writer(self.csv_file)
-            self.csv_writer.writerow(["timestamp (AEST)", "ax", "ay", "az", "gx", "gy", "gz"])
+        if not self.recording_active:
+            filename = self.filename_var.get().strip()
+            if not filename:
+                messagebox.showwarning("File Name Required", "Please enter a file name before recording.")
+                return
+            if not filename.lower().endswith(".csv"):
+                filename = f"{filename}.csv"
+
+            self.recording_filename = filename
+            self.current_recording_label = datetime.now(AEST).strftime("Recording %Y-%m-%d %H:%M:%S")
+            self.recording_data = []
+            self.recording_active = True
             self.record_button.config(text="🛑 Stop Recording")
             print(f"💾 Recording started: {filename}")
         else:
-            self.csv_file.close()
-            self.csv_writer = None
-            self.csv_file = None
-            self.record_button.config(text="💾 Start Recording")
-            print("🛑 Recording stopped.")
+            self._finalize_recording()
 
     # --------------------------
     # HANDLE NOTIFICATION
@@ -212,8 +224,14 @@ class GestureIOApp:
             for buf in self.data_buffer:
                 buf.pop(0)
 
-        if self.csv_writer:
-            self.csv_writer.writerow([ts, ax, ay, az, gx, gy, gz])
+        if self.recording_active:
+            self.recording_data.append(
+                f"{ts},{ax},{ay},{az},{gx},{gy},{gz}"
+            )
+            if len(self.recording_data) >= 128:
+                # Stop capturing additional samples immediately and finalize on the GUI thread
+                self.recording_active = False
+                self.root.after(0, self._finalize_recording)
 
     # --------------------------
     # REALTIME PLOT UPDATE
@@ -226,6 +244,82 @@ class GestureIOApp:
         self.ax.autoscale_view()
         self.canvas.draw()
         self.root.after(200, self.update_plot)
+
+    # --------------------------
+    # SAVE RECORDING TO FILE
+    # --------------------------
+    def _save_recording(self):
+        if not self.recording_filename:
+            return
+
+        if not self.recording_data:
+            print("⚠️ No data captured during recording; nothing to save.")
+            return
+
+        filename = self.recording_filename
+        column_label = self.current_recording_label or datetime.now(AEST).strftime(
+            "Recording %Y-%m-%d %H:%M:%S"
+        )
+
+        rows = []
+        if os.path.exists(filename):
+            with open(filename, newline="") as existing_file:
+                rows = list(csv.reader(existing_file))
+
+        if not rows:
+            rows = [[column_label]]
+        else:
+            existing_columns = len(rows[0]) if rows else 0
+            for row in rows:
+                if len(row) < existing_columns:
+                    row.extend([""] * (existing_columns - len(row)))
+                elif len(row) > existing_columns:
+                    del row[existing_columns:]
+            rows[0].append(column_label)
+
+        total_columns = len(rows[0])
+
+        for row in rows[1:]:
+            if len(row) < total_columns:
+                row.extend([""] * (total_columns - len(row)))
+            elif len(row) > total_columns:
+                del row[total_columns:]
+
+        for index, sample in enumerate(self.recording_data, start=1):
+            if index >= len(rows):
+                rows.append([""] * total_columns)
+            if len(rows[index]) < total_columns:
+                rows[index].extend([""] * (total_columns - len(rows[index])))
+            rows[index][total_columns - 1] = sample
+
+        for row in rows:
+            if len(row) < total_columns:
+                row.extend([""] * (total_columns - len(row)))
+
+        with open(filename, "w", newline="") as output_file:
+            writer = csv.writer(output_file)
+            writer.writerows(rows)
+
+        print(f"💾 Recording saved to {os.path.abspath(filename)} (column: {column_label})")
+
+    def _finalize_recording(self):
+        """Stop recording and persist collected samples."""
+        self.recording_active = False
+        sample_count = len(self.recording_data)
+
+        if self.record_button.cget("text") != "💾 Start Recording":
+            self.record_button.config(text="💾 Start Recording")
+
+        try:
+            self._save_recording()
+        except Exception as e:
+            messagebox.showerror("Save Error", str(e))
+        finally:
+            self.recording_data = []
+            self.recording_filename = None
+            self.current_recording_label = None
+            if sample_count:
+                print(f"🛑 Recording stopped after capturing {sample_count} samples.")
 
 # --------------------------
 # MAIN APP ENTRY
