@@ -1,0 +1,20 @@
+{
+  "window_size": 32,
+  "step_size": 8,
+  "num_channels": 6,
+  "labels": [
+    "IDLE",
+    "SWIPE_LEFT",
+    "SWIPE_RIGHT",
+    "WAVE"
+  ],
+  "channel_order": [
+    "ax",
+    "ay",
+    "az",
+    "gx",
+    "gy",
+    "gz"
+  ],
+  "version": 1
+}
