@@ -25,12 +25,12 @@ void setup() {
   Serial.println("🚀 GestureIO Node Initializing...");
 
   if (!IMU.begin()) {
-    Serial.println("❌ Failed to initialize IMU!");
+    Serial.println("Failed to initialize IMU!");
     while (1);
   }
 
   if (!BLE.begin()) {
-    Serial.println("❌ Starting BLE failed!");
+    Serial.println("Starting BLE failed!");
     while (1);
   }
 
@@ -48,7 +48,7 @@ void setup() {
   commandChar.setEventHandler(BLEWritten, onCommandReceived);
 
   BLE.advertise();
-  Serial.println("✅ BLE GestureIO Node ready and advertising...");
+  Serial.println("BLE GestureIO Node ready and advertising...");
 }
 
 void loop() {
@@ -78,7 +78,7 @@ void loop() {
     // Reset when disconnected
     isStreaming = false;
     statusChar.writeValue("IDLE");
-    Serial.println("❌ Disconnected.");
+    Serial.println("Disconnected.");
   }
 }
 
